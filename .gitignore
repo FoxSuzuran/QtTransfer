@@ -1,0 +1,17 @@
+/build/
+
+.qmake.stash
+*.pro.user
+*.qtc_clangd
+
+Makefile
+*/Makefile
+
+moc_*
+ui_*
+qrc_*
+*.o
+*.obj
+
+*~
+~$*
