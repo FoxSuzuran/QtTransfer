@@ -112,6 +112,90 @@ private slots:
             qInfo() << "Saved file:" << file.fileName();
             socket->write("OK");
             socket->waitForBytesWritten(3000);
+        } else if (command == "PUT_CHUNK") {
+            QString fileName;
+            qint64 fileSize = 0;
+            int chunkCount = 0;
+            int chunkIndex = 0;
+            qint64 chunkSize = 0;
+            headerStream >> fileName >> fileSize >> chunkCount >> chunkIndex >> chunkSize;
+
+            if (!QFileInfo(fileName).isAbsolute()) {
+                fileName = QDir(saveDir).filePath(fileName);
+            }
+
+            QFileInfo fileInfo(fileName);
+            QDir().mkpath(fileInfo.path());
+
+            if (chunkIndex == 0) {
+                QFile::remove(fileInfo.filePath());
+                for (int i = 0; i < chunkCount; ++i) {
+                    QFile::remove(fileInfo.filePath() + QString(".part%1").arg(i));
+                }
+            }
+
+            QString partFileName = fileInfo.filePath() + QString(".part%1").arg(chunkIndex);
+            QFile partFile(partFileName);
+            if (!partFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                qInfo() << "Open part file failed:" << partFile.fileName();
+                socket->disconnectFromHost();
+                socket = nullptr;
+                return;
+            }
+
+            qInfo() << "Receiving chunk:" << chunkIndex + 1 << "/" << chunkCount << fileName;
+
+            qint64 received = 0;
+            while (received < chunkSize) {
+                if (socket->bytesAvailable() == 0 && !socket->waitForReadyRead(5000)) {
+                    partFile.close();
+                    socket->disconnectFromHost();
+                    socket = nullptr;
+                    return;
+                }
+
+                QByteArray data = socket->read(qMin<qint64>(64 * 1024, chunkSize - received));
+                if (!data.isEmpty()) {
+                    partFile.write(data);
+                    received += data.size();
+                }
+            }
+
+            partFile.close();
+
+            if (chunkIndex == chunkCount - 1) {
+                QFile file(fileInfo.filePath());
+                if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                    qInfo() << "Open merged file failed:" << file.fileName();
+                    socket->disconnectFromHost();
+                    socket = nullptr;
+                    return;
+                }
+
+                for (int i = 0; i < chunkCount; ++i) {
+                    QFile currentPart(fileInfo.filePath() + QString(".part%1").arg(i));
+                    if (!currentPart.open(QIODevice::ReadOnly)) {
+                        file.close();
+                        socket->disconnectFromHost();
+                        socket = nullptr;
+                        return;
+                    }
+
+                    while (!currentPart.atEnd()) {
+                        file.write(currentPart.read(64 * 1024));
+                    }
+
+                    currentPart.close();
+                    currentPart.remove();
+                }
+
+                file.close();
+                qInfo() << "Merged file:" << file.fileName();
+                qInfo() << "File size:" << fileSize;
+            }
+
+            socket->write("OK");
+            socket->waitForBytesWritten(3000);
         } else if (command == "MKDIR") {
             QString dirPath;
             headerStream >> dirPath;

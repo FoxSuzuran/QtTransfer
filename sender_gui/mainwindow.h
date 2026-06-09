@@ -7,6 +7,7 @@ class QLineEdit;
 class QLabel;
 class QListWidget;
 class QListWidgetItem;
+class QProgressBar;
 
 class MainWindow : public QWidget
 {
@@ -30,6 +31,7 @@ private:
     QLabel *statusLabel;
     QLabel *remotePathLabel;
     QListWidget *remoteList;
+    QProgressBar *progressBar;
     QString currentRemotePath;
 };
 
