@@ -7,6 +7,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <functional>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -424,107 +425,248 @@ void MainWindow::downloadFile()
     }
 
     QString remoteFileName = remoteList->currentItem()->text();
-    if (remoteFileName == "../" || remoteFileName.endsWith("/")) {
-        QMessageBox::warning(this, "提示", "当前选中的是目录，请先进入目录");
+    if (remoteFileName == "../") {
+        QMessageBox::warning(this, "提示", "请先选择远端目录或文件");
         return;
     }
 
-    QString remoteFilePath = currentRemotePath.isEmpty() ? remoteFileName : QDir(currentRemotePath).filePath(remoteFileName);
-    QTcpSocket socket;
-    socket.setProxy(QNetworkProxy::NoProxy);
-    statusLabel->setText("正在请求下载...");
+    auto listRemoteDir = [&](const QString &remotePath, QString *currentPath, QStringList *files) {
+        QTcpSocket socket;
+        socket.setProxy(QNetworkProxy::NoProxy);
+        socket.connectToHost(ipEdit->text().trimmed(), portEdit->text().toUShort());
+
+        if (!socket.waitForConnected(5000)) {
+            return false;
+        }
+
+        QByteArray header;
+        QDataStream headerStream(&header, QIODevice::WriteOnly);
+        headerStream.setVersion(QDataStream::Qt_5_0);
+        headerStream << QString("LIST") << remotePath;
+
+        QDataStream socketStream(&socket);
+        socketStream.setVersion(QDataStream::Qt_5_0);
+        socketStream << static_cast<quint32>(header.size());
+        socket.write(header);
+        socket.waitForBytesWritten(3000);
+
+        while (socket.bytesAvailable() < static_cast<qint64>(sizeof(quint32))) {
+            if (!socket.waitForReadyRead(5000)) {
+                return false;
+            }
+        }
+
+        quint32 replySize = 0;
+        socketStream >> replySize;
+
+        while (socket.bytesAvailable() < replySize) {
+            if (!socket.waitForReadyRead(5000)) {
+                return false;
+            }
+        }
+
+        QByteArray reply = socket.read(replySize);
+        QDataStream replyStream(&reply, QIODevice::ReadOnly);
+        replyStream.setVersion(QDataStream::Qt_5_0);
+        replyStream >> *currentPath >> *files;
+        socket.disconnectFromHost();
+        return true;
+    };
+
+    auto downloadOneFile = [&](const QString &remoteFilePath, const QString &savePath, int finishedFiles, int totalFiles) {
+        QTcpSocket socket;
+        socket.setProxy(QNetworkProxy::NoProxy);
+        statusLabel->setText(QString("正在下载 %1").arg(QFileInfo(savePath).fileName()));
+        socket.connectToHost(ipEdit->text().trimmed(), portEdit->text().toUShort());
+
+        if (!socket.waitForConnected(5000)) {
+            return false;
+        }
+
+        QByteArray header;
+        QDataStream headerStream(&header, QIODevice::WriteOnly);
+        headerStream.setVersion(QDataStream::Qt_5_0);
+        headerStream << QString("GET") << remoteFilePath;
+
+        QDataStream socketStream(&socket);
+        socketStream.setVersion(QDataStream::Qt_5_0);
+        socketStream << static_cast<quint32>(header.size());
+        socket.write(header);
+        socket.waitForBytesWritten(3000);
+
+        while (socket.bytesAvailable() < static_cast<qint64>(sizeof(quint32))) {
+            if (!socket.waitForReadyRead(5000)) {
+                return false;
+            }
+        }
+
+        quint32 replySize = 0;
+        socketStream >> replySize;
+
+        while (socket.bytesAvailable() < replySize) {
+            if (!socket.waitForReadyRead(5000)) {
+                return false;
+            }
+        }
+
+        QByteArray reply = socket.read(replySize);
+        QDataStream replyStream(&reply, QIODevice::ReadOnly);
+        replyStream.setVersion(QDataStream::Qt_5_0);
+
+        qint64 fileSize = -1;
+        replyStream >> fileSize;
+        if (fileSize < 0) {
+            return false;
+        }
+
+        QFileInfo saveInfo(savePath);
+        QDir().mkpath(saveInfo.path());
+
+        QFile file(savePath);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            return false;
+        }
+
+        qint64 received = 0;
+        while (received < fileSize) {
+            if (socket.bytesAvailable() == 0 && !socket.waitForReadyRead(5000)) {
+                file.close();
+                return false;
+            }
+
+            QByteArray data = socket.read(qMin<qint64>(64 * 1024, fileSize - received));
+            if (!data.isEmpty()) {
+                file.write(data);
+                received += data.size();
+
+                if (totalFiles <= 0) {
+                    progressBar->setValue(fileSize <= 0 ? 100 : static_cast<int>(received * 100 / fileSize));
+                } else {
+                    double current = fileSize <= 0 ? 1.0 : static_cast<double>(received) / fileSize;
+                    progressBar->setValue(static_cast<int>((finishedFiles + current) * 100 / totalFiles));
+                }
+                QApplication::processEvents();
+            }
+        }
+
+        file.close();
+        socket.disconnectFromHost();
+        return true;
+    };
+
     progressBar->setValue(0);
-    socket.connectToHost(ipEdit->text().trimmed(), portEdit->text().toUShort());
+    QApplication::processEvents();
 
-    if (!socket.waitForConnected(5000)) {
-        statusLabel->setText("连接失败");
-        QMessageBox::warning(this, "提示", "连接接收端失败");
+    if (!remoteFileName.endsWith("/")) {
+        QString remoteFilePath = currentRemotePath.isEmpty() ? remoteFileName : QDir(currentRemotePath).filePath(remoteFileName);
+        QString savePath = QFileDialog::getSaveFileName(this, "保存文件", remoteFileName);
+        if (savePath.isEmpty()) {
+            statusLabel->setText("已取消下载");
+            return;
+        }
+
+        if (!downloadOneFile(remoteFilePath, savePath, 0, 1)) {
+            statusLabel->setText("下载失败");
+            QMessageBox::warning(this, "提示", "文件下载失败");
+            return;
+        }
+
+        statusLabel->setText("下载成功");
+        progressBar->setValue(100);
+        QMessageBox::information(this, "完成", "文件下载成功");
         return;
     }
 
-    QByteArray header;
-    QDataStream headerStream(&header, QIODevice::WriteOnly);
-    headerStream.setVersion(QDataStream::Qt_5_0);
-    headerStream << QString("GET") << remoteFilePath;
-
-    QDataStream socketStream(&socket);
-    socketStream.setVersion(QDataStream::Qt_5_0);
-    socketStream << static_cast<quint32>(header.size());
-    socket.write(header);
-    socket.waitForBytesWritten(3000);
-
-    while (socket.bytesAvailable() < static_cast<qint64>(sizeof(quint32))) {
-        if (!socket.waitForReadyRead(5000)) {
-            statusLabel->setText("下载失败");
-            QMessageBox::warning(this, "提示", "没有收到文件信息");
-            return;
-        }
-    }
-
-    quint32 replySize = 0;
-    socketStream >> replySize;
-
-    while (socket.bytesAvailable() < replySize) {
-        if (!socket.waitForReadyRead(5000)) {
-            statusLabel->setText("下载失败");
-            QMessageBox::warning(this, "提示", "文件信息接收不完整");
-            return;
-        }
-    }
-
-    QByteArray reply = socket.read(replySize);
-    QDataStream replyStream(&reply, QIODevice::ReadOnly);
-    replyStream.setVersion(QDataStream::Qt_5_0);
-
-    qint64 fileSize = -1;
-    replyStream >> fileSize;
-    if (fileSize < 0) {
-        statusLabel->setText("下载失败");
-        QMessageBox::warning(this, "提示", "远端文件不存在");
-        return;
-    }
-
-    QString savePath = QFileDialog::getSaveFileName(this, "保存文件", remoteFileName);
-    if (savePath.isEmpty()) {
+    QString dirName = remoteFileName;
+    dirName.chop(1);
+    QString remoteDirPath = currentRemotePath.isEmpty() ? dirName : QDir(currentRemotePath).filePath(dirName);
+    QString localBasePath = QFileDialog::getExistingDirectory(this, "选择保存目录");
+    if (localBasePath.isEmpty()) {
         statusLabel->setText("已取消下载");
         return;
     }
 
-    QFile file(savePath);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        statusLabel->setText("下载失败");
-        QMessageBox::warning(this, "提示", "本地文件打开失败");
+    QString localRootPath = QDir(localBasePath).filePath(dirName);
+    QDir().mkpath(localRootPath);
+
+    int totalFiles = 0;
+    std::function<bool(const QString &)> countRemoteFiles = [&](const QString &path) {
+        QString currentPath;
+        QStringList files;
+        if (!listRemoteDir(path, &currentPath, &files)) {
+            return false;
+        }
+
+        for (QString fileName : files) {
+            if (fileName == "../") {
+                continue;
+            }
+
+            if (fileName.endsWith("/")) {
+                fileName.chop(1);
+                if (!countRemoteFiles(QDir(currentPath).filePath(fileName))) {
+                    return false;
+                }
+            } else {
+                totalFiles++;
+            }
+        }
+
+        return true;
+    };
+
+    std::function<bool(const QString &, const QString &, int &)> downloadRemoteDir =
+        [&](const QString &remotePath, const QString &localPath, int &finishedFiles) {
+            QDir().mkpath(localPath);
+
+            QString currentPath;
+            QStringList files;
+            if (!listRemoteDir(remotePath, &currentPath, &files)) {
+                return false;
+            }
+
+            for (QString fileName : files) {
+                if (fileName == "../") {
+                    continue;
+                }
+
+                if (fileName.endsWith("/")) {
+                    fileName.chop(1);
+                    if (!downloadRemoteDir(QDir(currentPath).filePath(fileName), QDir(localPath).filePath(fileName), finishedFiles)) {
+                        return false;
+                    }
+                } else {
+                    if (!downloadOneFile(QDir(currentPath).filePath(fileName), QDir(localPath).filePath(fileName), finishedFiles, totalFiles)) {
+                        return false;
+                    }
+
+                    finishedFiles++;
+                    progressBar->setValue(totalFiles <= 0 ? 100 : static_cast<int>(finishedFiles * 100 / totalFiles));
+                    QApplication::processEvents();
+                }
+            }
+
+            return true;
+        };
+
+    statusLabel->setText("正在统计目录...");
+    if (!countRemoteFiles(remoteDirPath)) {
+        statusLabel->setText("目录下载失败");
+        QMessageBox::warning(this, "提示", "远端目录读取失败");
         return;
     }
 
-    qint64 received = 0;
-    while (received < fileSize) {
-        if (socket.bytesAvailable() == 0 && !socket.waitForReadyRead(5000)) {
-            file.close();
-            statusLabel->setText("下载失败");
-            QMessageBox::warning(this, "提示", "文件接收失败");
-            return;
-        }
-
-        QByteArray data = socket.read(qMin<qint64>(64 * 1024, fileSize - received));
-        if (!data.isEmpty()) {
-            file.write(data);
-            received += data.size();
-
-            if (fileSize <= 0) {
-                progressBar->setValue(100);
-            } else {
-                progressBar->setValue(static_cast<int>(received * 100 / fileSize));
-            }
-            QApplication::processEvents();
-        }
+    int finishedFiles = 0;
+    statusLabel->setText("正在下载目录...");
+    if (!downloadRemoteDir(remoteDirPath, localRootPath, finishedFiles)) {
+        statusLabel->setText("目录下载失败");
+        QMessageBox::warning(this, "提示", "目录下载失败");
+        return;
     }
 
-    file.close();
-    statusLabel->setText("下载成功");
+    statusLabel->setText("目录下载成功");
     progressBar->setValue(100);
-    QMessageBox::information(this, "完成", "文件下载成功");
-    socket.disconnectFromHost();
+    QMessageBox::information(this, "完成", QString("目录下载成功，共下载 %1 个文件").arg(finishedFiles));
 }
 
 void MainWindow::openRemoteItem(QListWidgetItem *item)
