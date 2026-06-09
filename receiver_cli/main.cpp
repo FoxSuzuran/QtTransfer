@@ -3,6 +3,7 @@
 #include <QDebug>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QHostAddress>
 #include <QNetworkProxy>
 #include <QTcpServer>
@@ -15,9 +16,9 @@ class Receiver : public QObject
 
 public:
     Receiver(quint16 port, const QString &saveDir, QObject *parent = nullptr)
-        : QObject(parent), saveDir(saveDir)
+        : QObject(parent), saveDir(QDir(saveDir).absolutePath())
     {
-        QDir().mkpath(saveDir);
+        QDir().mkpath(this->saveDir);
         server.setProxy(QNetworkProxy::NoProxy);
 
         connect(&server, &QTcpServer::newConnection, this, &Receiver::acceptConnection);
@@ -28,7 +29,7 @@ public:
         }
 
         qInfo() << "Listening on port" << port;
-        qInfo() << "Save directory:" << QDir(saveDir).absolutePath();
+        qInfo() << "Start directory:" << this->saveDir;
     }
 
 private slots:
@@ -38,7 +39,7 @@ private slots:
         connect(socket, &QTcpSocket::disconnected, socket, &QTcpSocket::deleteLater);
 
         qInfo() << "Client connected:" << socket->peerAddress().toString();
-        qInfo() << "Current save directory:" << QDir(saveDir).absolutePath();
+        qInfo() << "Current directory:" << saveDir;
 
         while (socket->bytesAvailable() < static_cast<qint64>(sizeof(quint32))) {
             if (!socket->waitForReadyRead(5000)) {
@@ -73,7 +74,14 @@ private slots:
             qint64 fileSize = 0;
             headerStream >> fileName >> fileSize;
 
-            QFile file(QDir(saveDir).filePath(fileName));
+            if (!QFileInfo(fileName).isAbsolute()) {
+                fileName = QDir(saveDir).filePath(fileName);
+            }
+
+            QFileInfo fileInfo(fileName);
+            QDir().mkpath(fileInfo.path());
+
+            QFile file(fileInfo.filePath());
             if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
                 qInfo() << "Open file failed:" << file.fileName();
                 socket->disconnectFromHost();
@@ -104,12 +112,49 @@ private slots:
             qInfo() << "Saved file:" << file.fileName();
             socket->write("OK");
             socket->waitForBytesWritten(3000);
+        } else if (command == "MKDIR") {
+            QString dirPath;
+            headerStream >> dirPath;
+
+            if (!QFileInfo(dirPath).isAbsolute()) {
+                dirPath = QDir(saveDir).filePath(dirPath);
+            }
+
+            QDir().mkpath(dirPath);
+            qInfo() << "Created directory:" << dirPath;
+            socket->write("OK");
+            socket->waitForBytesWritten(3000);
         } else if (command == "LIST") {
-            QStringList files = QDir(saveDir).entryList(QDir::Files | QDir::NoDotAndDotDot, QDir::Name);
+            QString dirPath;
+            headerStream >> dirPath;
+
+            if (dirPath.isEmpty()) {
+                dirPath = saveDir;
+            } else if (!QFileInfo(dirPath).isAbsolute()) {
+                dirPath = QDir(saveDir).filePath(dirPath);
+            }
+
+            QDir dir(dirPath);
+            if (!dir.exists()) {
+                dir.setPath(saveDir);
+            }
+
+            QString currentPath = dir.absolutePath();
+            QStringList files;
+
+            if (currentPath != dir.rootPath()) {
+                files << "../";
+            }
+
+            QFileInfoList fileInfos = dir.entryInfoList(QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot, QDir::DirsFirst | QDir::Name);
+            for (const QFileInfo &fileInfo : fileInfos) {
+                files << (fileInfo.isDir() ? fileInfo.fileName() + "/" : fileInfo.fileName());
+            }
+
             QByteArray reply;
             QDataStream replyStream(&reply, QIODevice::WriteOnly);
             replyStream.setVersion(QDataStream::Qt_5_0);
-            replyStream << files;
+            replyStream << currentPath << files;
 
             QDataStream out(socket);
             out.setVersion(QDataStream::Qt_5_0);
@@ -120,7 +165,11 @@ private slots:
             QString fileName;
             headerStream >> fileName;
 
-            QFile file(QDir(saveDir).filePath(fileName));
+            if (!QFileInfo(fileName).isAbsolute()) {
+                fileName = QDir(saveDir).filePath(fileName);
+            }
+
+            QFile file(fileName);
             QByteArray reply;
             QDataStream replyStream(&reply, QIODevice::WriteOnly);
             replyStream.setVersion(QDataStream::Qt_5_0);

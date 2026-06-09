@@ -6,6 +6,7 @@
 class QLineEdit;
 class QLabel;
 class QListWidget;
+class QListWidgetItem;
 
 class MainWindow : public QWidget
 {
@@ -16,16 +17,20 @@ public:
 
 private slots:
     void chooseFile();
+    void chooseDirectory();
     void sendFile();
     void refreshFiles();
     void downloadFile();
+    void openRemoteItem(QListWidgetItem *item);
 
 private:
     QLineEdit *ipEdit;
     QLineEdit *portEdit;
     QLineEdit *fileEdit;
     QLabel *statusLabel;
+    QLabel *remotePathLabel;
     QListWidget *remoteList;
+    QString currentRemotePath;
 };
 
 #endif
