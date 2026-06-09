@@ -1,10 +1,14 @@
 #include "mainwindow.h"
 
+#include <QDataStream>
+#include <QFile>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QNetworkProxy>
 #include <QPushButton>
 #include <QTcpSocket>
 #include <QVBoxLayout>
@@ -25,9 +29,9 @@ MainWindow::MainWindow(QWidget *parent)
     fileEdit->setReadOnly(true);
 
     QPushButton *browseButton = new QPushButton("选择文件");
-    QPushButton *testButton = new QPushButton("连接测试");
+    QPushButton *sendButton = new QPushButton("发送文件");
 
-    statusLabel = new QLabel("请选择文件，并测试接收端连接");
+    statusLabel = new QLabel("请选择文件并发送");
 
     QHBoxLayout *ipLayout = new QHBoxLayout;
     ipLayout->addWidget(ipLabel);
@@ -44,7 +48,7 @@ MainWindow::MainWindow(QWidget *parent)
     mainLayout->addLayout(ipLayout);
     mainLayout->addLayout(fileLayout);
     mainLayout->addWidget(statusLabel);
-    mainLayout->addWidget(testButton);
+    mainLayout->addWidget(sendButton);
 
     setStyleSheet(
         "QWidget { background: #f6f7fb; font-size: 14px; }"
@@ -54,19 +58,20 @@ MainWindow::MainWindow(QWidget *parent)
         "QLabel { color: #243042; }");
 
     connect(browseButton, &QPushButton::clicked, this, &MainWindow::chooseFile);
-    connect(testButton, &QPushButton::clicked, this, &MainWindow::testConnection);
+    connect(sendButton, &QPushButton::clicked, this, &MainWindow::sendFile);
 }
 
 void MainWindow::chooseFile()
 {
     QString path = QFileDialog::getOpenFileName(this, "选择要发送的文件");
+
     if (!path.isEmpty()) {
         fileEdit->setText(path);
-        statusLabel->setText("文件已选择，可以测试连接");
+        statusLabel->setText("文件已选择，可以发送");
     }
 }
 
-void MainWindow::testConnection()
+void MainWindow::sendFile()
 {
     if (fileEdit->text().isEmpty()) {
         QMessageBox::warning(this, "提示", "请先选择文件");
@@ -78,8 +83,15 @@ void MainWindow::testConnection()
         return;
     }
 
+    QFile file(fileEdit->text());
+    if (!file.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, "提示", "文件打开失败");
+        return;
+    }
+
     QTcpSocket socket;
-    statusLabel->setText("正在测试连接...");
+    socket.setProxy(QNetworkProxy::NoProxy);
+    statusLabel->setText("正在连接接收端...");
     socket.connectToHost(ipEdit->text().trimmed(), portEdit->text().toUShort());
 
     if (!socket.waitForConnected(5000)) {
@@ -88,7 +100,34 @@ void MainWindow::testConnection()
         return;
     }
 
-    statusLabel->setText("连接成功，可以进入下一阶段");
-    QMessageBox::information(this, "完成", "连接测试成功");
+    QFileInfo info(file);
+    QByteArray header;
+    QDataStream headerStream(&header, QIODevice::WriteOnly);
+    headerStream.setVersion(QDataStream::Qt_5_0);
+    headerStream << info.fileName() << static_cast<qint64>(file.size());
+
+    QDataStream socketStream(&socket);
+    socketStream.setVersion(QDataStream::Qt_5_0);
+    socketStream << static_cast<quint32>(header.size());
+    socket.write(header);
+
+    while (!file.atEnd()) {
+        socket.write(file.read(64 * 1024));
+        if (!socket.waitForBytesWritten(5000)) {
+            statusLabel->setText("发送失败");
+            QMessageBox::warning(this, "提示", "文件发送失败");
+            return;
+        }
+    }
+
+    statusLabel->setText("文件已发送，等待确认...");
+    if (socket.waitForReadyRead(5000) && socket.readAll().contains("OK")) {
+        statusLabel->setText("发送成功");
+        QMessageBox::information(this, "完成", "文件发送成功");
+    } else {
+        statusLabel->setText("未收到接收确认");
+        QMessageBox::warning(this, "提示", "文件已发送，但未收到确认");
+    }
+
     socket.disconnectFromHost();
 }

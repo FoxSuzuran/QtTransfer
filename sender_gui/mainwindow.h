@@ -15,7 +15,7 @@ public:
 
 private slots:
     void chooseFile();
-    void testConnection();
+    void sendFile();
 
 private:
     QLineEdit *ipEdit;
