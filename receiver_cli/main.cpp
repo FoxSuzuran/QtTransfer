@@ -35,94 +35,134 @@ private slots:
     void acceptConnection()
     {
         socket = server.nextPendingConnection();
-        file.close();
-        fileName.clear();
-        headerSize = 0;
-        fileSize = 0;
-        received = 0;
-
-        connect(socket, &QTcpSocket::readyRead, this, &Receiver::readData);
         connect(socket, &QTcpSocket::disconnected, socket, &QTcpSocket::deleteLater);
-        connect(socket, &QTcpSocket::disconnected, this, &Receiver::clientDisconnected);
 
         qInfo() << "Client connected:" << socket->peerAddress().toString();
         qInfo() << "Current save directory:" << QDir(saveDir).absolutePath();
-    }
 
-    void readData()
-    {
-        if (!socket) {
-            return;
+        while (socket->bytesAvailable() < static_cast<qint64>(sizeof(quint32))) {
+            if (!socket->waitForReadyRead(5000)) {
+                socket->disconnectFromHost();
+                socket = nullptr;
+                return;
+            }
         }
 
+        quint32 headerSize = 0;
         QDataStream in(socket);
         in.setVersion(QDataStream::Qt_5_0);
+        in >> headerSize;
 
-        if (headerSize == 0) {
-            if (socket->bytesAvailable() < static_cast<qint64>(sizeof(quint32))) {
+        while (socket->bytesAvailable() < headerSize) {
+            if (!socket->waitForReadyRead(5000)) {
+                socket->disconnectFromHost();
+                socket = nullptr;
                 return;
             }
-
-            in >> headerSize;
         }
 
-        if (fileName.isEmpty()) {
-            if (socket->bytesAvailable() < headerSize) {
-                return;
-            }
+        QByteArray header = socket->read(headerSize);
+        QDataStream headerStream(&header, QIODevice::ReadOnly);
+        headerStream.setVersion(QDataStream::Qt_5_0);
 
-            in >> fileName >> fileSize;
-            file.setFileName(QDir(saveDir).filePath(fileName));
+        QString command;
+        headerStream >> command;
 
+        if (command == "PUT") {
+            QString fileName;
+            qint64 fileSize = 0;
+            headerStream >> fileName >> fileSize;
+
+            QFile file(QDir(saveDir).filePath(fileName));
             if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
                 qInfo() << "Open file failed:" << file.fileName();
                 socket->disconnectFromHost();
+                socket = nullptr;
                 return;
             }
 
             qInfo() << "Receiving file:" << fileName;
             qInfo() << "File size:" << fileSize;
-        }
 
-        QByteArray data = socket->readAll();
-        if (!data.isEmpty()) {
-            file.write(data);
-            received += data.size();
-        }
+            qint64 received = 0;
+            while (received < fileSize) {
+                if (socket->bytesAvailable() == 0 && !socket->waitForReadyRead(5000)) {
+                    file.close();
+                    socket->disconnectFromHost();
+                    socket = nullptr;
+                    return;
+                }
 
-        if (fileName.isEmpty()) {
-            return;
-        }
+                QByteArray data = socket->read(qMin<qint64>(64 * 1024, fileSize - received));
+                if (!data.isEmpty()) {
+                    file.write(data);
+                    received += data.size();
+                }
+            }
 
-        if (received >= fileSize) {
             file.close();
             qInfo() << "Saved file:" << file.fileName();
             socket->write("OK");
             socket->waitForBytesWritten(3000);
-            socket->disconnectFromHost();
+        } else if (command == "LIST") {
+            QStringList files = QDir(saveDir).entryList(QDir::Files | QDir::NoDotAndDotDot, QDir::Name);
+            QByteArray reply;
+            QDataStream replyStream(&reply, QIODevice::WriteOnly);
+            replyStream.setVersion(QDataStream::Qt_5_0);
+            replyStream << files;
+
+            QDataStream out(socket);
+            out.setVersion(QDataStream::Qt_5_0);
+            out << static_cast<quint32>(reply.size());
+            socket->write(reply);
+            socket->waitForBytesWritten(3000);
+        } else if (command == "GET") {
+            QString fileName;
+            headerStream >> fileName;
+
+            QFile file(QDir(saveDir).filePath(fileName));
+            QByteArray reply;
+            QDataStream replyStream(&reply, QIODevice::WriteOnly);
+            replyStream.setVersion(QDataStream::Qt_5_0);
+
+            if (!file.open(QIODevice::ReadOnly)) {
+                replyStream << static_cast<qint64>(-1);
+                QDataStream out(socket);
+                out.setVersion(QDataStream::Qt_5_0);
+                out << static_cast<quint32>(reply.size());
+                socket->write(reply);
+                socket->waitForBytesWritten(3000);
+            } else {
+                replyStream << static_cast<qint64>(file.size());
+                QDataStream out(socket);
+                out.setVersion(QDataStream::Qt_5_0);
+                out << static_cast<quint32>(reply.size());
+                socket->write(reply);
+                socket->waitForBytesWritten(3000);
+
+                while (!file.atEnd()) {
+                    socket->write(file.read(64 * 1024));
+                    if (!socket->waitForBytesWritten(5000)) {
+                        file.close();
+                        socket->disconnectFromHost();
+                        socket = nullptr;
+                        return;
+                    }
+                }
+
+                file.close();
+                qInfo() << "Sent file:" << fileName;
+            }
         }
+
+        socket->disconnectFromHost();
+        socket = nullptr;
     }
 
 private:
-    void clientDisconnected()
-    {
-        qInfo() << "Client disconnected";
-        if (file.isOpen()) {
-            file.close();
-        }
-        if (socket) {
-            socket = nullptr;
-        }
-    }
-
     QTcpServer server;
     QTcpSocket *socket = nullptr;
-    QFile file;
     QString saveDir;
-    QString fileName;
-    quint32 headerSize = 0;
-    qint64 fileSize = 0;
-    qint64 received = 0;
 };
 
 int main(int argc, char *argv[])

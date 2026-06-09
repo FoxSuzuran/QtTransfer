@@ -5,6 +5,7 @@
 
 class QLineEdit;
 class QLabel;
+class QListWidget;
 
 class MainWindow : public QWidget
 {
@@ -16,12 +17,15 @@ public:
 private slots:
     void chooseFile();
     void sendFile();
+    void refreshFiles();
+    void downloadFile();
 
 private:
     QLineEdit *ipEdit;
     QLineEdit *portEdit;
     QLineEdit *fileEdit;
     QLabel *statusLabel;
+    QListWidget *remoteList;
 };
 
 #endif
